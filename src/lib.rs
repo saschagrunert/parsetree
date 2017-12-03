@@ -49,9 +49,12 @@ pub mod prelude {
 
 #[derive(Debug)]
 /// General return type of the Peel traversals
-pub struct PeelResult<'a> {
+pub struct PeelResult<'a, ParserId> {
     /// A vector of parser results
     pub result: ParserResultVec,
+
+    /// Identifiers of the parsers that matched
+    pub parsers: Vec<ParserId>,
 
     /// The left input
     pub left_input: &'a [u8],
@@ -60,24 +63,28 @@ pub struct PeelResult<'a> {
     pub error: Option<PeelError>,
 }
 
-impl<'a> PeelResult<'a> {
+impl<'a, ParserId> PeelResult<'a, ParserId> {
     /// Create a new `ParserResult`
-    fn new(result: ParserResultVec, left_input: &'a [u8], error: Option<PeelError>) -> Self {
+    fn new(result: ParserResultVec, parsers: Vec<ParserId>, left_input: &'a [u8], error: Option<PeelError>) -> Self {
         PeelResult {
-            result: result,
-            left_input: left_input,
-            error: error,
+            result,
+            parsers,
+            left_input,
+            error,
         }
     }
 }
 
 /// The main peeling structure
-pub struct Peel<D> {
+pub struct Peel<D, ParserId = ()> {
     /// The memory arena of the tree
     pub graph: StableGraph<Parser<D>, ()>,
 
     /// The first node added will be the root
     pub root: Option<NodeIndex>,
+
+    /// Provides the parser IDs/hints.
+    id_map: HashMap<NodeIndex, ParserId>,
 
     /// Additional data for which can be shared accross the parsers
     pub data: Option<D>,
@@ -86,12 +93,13 @@ pub struct Peel<D> {
     last_position: NodeIndex,
 }
 
-impl<D> Peel<D> {
+impl<D, ParserId: Clone> Peel<D, ParserId> {
     /// Create a new empty `Peel` instance
     pub fn new() -> Self {
         Peel {
             graph: StableGraph::new(),
             root: None,
+            id_map: HashMap::new(),
             data: None,
             last_position: NodeIndex::new(0),
         }
@@ -108,7 +116,7 @@ impl<D> Peel<D> {
     }
 
     /// Create a new boxed Parser and return a corresponding Node
-    pub fn new_parser<T>(&mut self, parser: T) -> NodeIndex
+    pub fn new_parser<T>(&mut self, parser: T, parser_id: ParserId) -> NodeIndex
         where T: Parsable<D> + 'static
     {
         info!("New parser: {}", parser);
@@ -120,6 +128,8 @@ impl<D> Peel<D> {
         if self.root.is_none() {
             self.root = Some(new_node);
         }
+
+        self.id_map.insert(new_node, parser_id);
 
         // Return the shiny new node
         new_node
@@ -145,11 +155,11 @@ impl<D> Peel<D> {
     }
 
     /// Create a new parser and link it with the provided node
-    pub fn link_new_parser<T>(&mut self, left: NodeIndex, parser: T) -> NodeIndex
+    pub fn link_new_parser<T>(&mut self, left: NodeIndex, parser: T, parser_id: ParserId) -> NodeIndex
         where T: Parsable<D> + 'static
     {
         // Create a new node
-        let new_parser = self.new_parser(parser);
+        let new_parser = self.new_parser(parser, parser_id);
 
         // Append the node to the given node
         self.link(left, new_parser);
@@ -162,10 +172,11 @@ impl<D> Peel<D> {
     ///
     /// # Errors
     /// When no tree root was found or the first parser already fails.
-    pub fn traverse<'a>(&mut self, input: &'a [u8], result: ParserResultVec) -> PeelResult<'a> {
+    pub fn traverse<'a>(&mut self, input: &'a [u8], result: ParserResultVec, parsers: Vec<ParserId>) -> PeelResult<'a, ParserId> {
         match self.root {
-            Some(node) => self.traverse_recursive(node, PeelResult::new(result, input, None)),
+            Some(node) => self.traverse_recursive(node, PeelResult::new(result, parsers, input, None)),
             None => PeelResult::new(result,
+                                    parsers,
                                     input,
                                     Some(PeelError::new(ErrorType::NoTreeRoot, "No tree root found"))),
         }
@@ -173,9 +184,9 @@ impl<D> Peel<D> {
 
     /// Continue the traversal from the last processed node. This can be useful if you want to
     /// continue traversal after an incomplete parsing.
-    pub fn continue_traverse<'a>(&mut self, input: &'a [u8], result: ParserResultVec) -> PeelResult<'a> {
+    pub fn continue_traverse<'a>(&mut self, input: &'a [u8], result: ParserResultVec, parsers: Vec<ParserId>) -> PeelResult<'a, ParserId> {
         let start_node = self.last_position;
-        let result = PeelResult::new(result, input, None);
+        let result = PeelResult::new(result, parsers, input, None);
         trace!("Continue traversal at {:?}", start_node);
         self.traverse_recursive(start_node, result)
     }
@@ -186,7 +197,7 @@ impl<D> Peel<D> {
     ///
     /// # Errors
     /// When the first parser already fails.
-    fn traverse_recursive<'a>(&mut self, node_id: NodeIndex, mut peel_result: PeelResult<'a>) -> PeelResult<'a> {
+    fn traverse_recursive<'a>(&mut self, node_id: NodeIndex, mut peel_result: PeelResult<'a, ParserId>) -> PeelResult<'a, ParserId> {
         let error = {
             // Get the values from the graph structure
             let parser = &mut self.graph[node_id];
@@ -207,6 +218,7 @@ impl<D> Peel<D> {
                            parser,
                            left_input.len());
                     peel_result.result.push(parser_result);
+                    peel_result.parsers.push(self.id_map.get(&node_id).expect("Missing a parser ID").clone());
                     peel_result.left_input = left_input;
                     None
                 }
