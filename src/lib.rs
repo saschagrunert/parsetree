@@ -24,6 +24,7 @@ pub mod error;
 pub mod parser;
 pub mod example;
 
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::prelude::*;
 use std::collections::HashMap;
@@ -78,13 +79,10 @@ impl<'a, ParserId> PeelResult<'a, ParserId> {
 /// The main peeling structure
 pub struct Peel<D, ParserId = ()> {
     /// The memory arena of the tree
-    pub graph: StableGraph<Parser<D>, ()>,
+    pub graph: StableGraph<(Parser<D>, ParserId), ()>,
 
     /// The first node added will be the root
     pub root: Option<NodeIndex>,
-
-    /// Provides the parser IDs/hints.
-    id_map: HashMap<NodeIndex, ParserId>,
 
     /// Additional data for which can be shared accross the parsers
     pub data: Option<D>,
@@ -93,13 +91,12 @@ pub struct Peel<D, ParserId = ()> {
     last_position: NodeIndex,
 }
 
-impl<D, ParserId: Clone> Peel<D, ParserId> {
+impl<D, ParserId: Clone + Debug> Peel<D, ParserId> {
     /// Create a new empty `Peel` instance
     pub fn new() -> Self {
         Peel {
             graph: StableGraph::new(),
             root: None,
-            id_map: HashMap::new(),
             data: None,
             last_position: NodeIndex::new(0),
         }
@@ -122,14 +119,12 @@ impl<D, ParserId: Clone> Peel<D, ParserId> {
         info!("New parser: {:?}", parser);
 
         // Create a new node
-        let new_node = self.graph.add_node(Box::new(parser));
+        let new_node = self.graph.add_node((Box::new(parser), parser_id));
 
         // Check if the root node is already set. If not, then this will be the root
         if self.root.is_none() {
             self.root = Some(new_node);
         }
-
-        self.id_map.insert(new_node, parser_id);
 
         // Return the shiny new node
         new_node
@@ -144,7 +139,7 @@ impl<D, ParserId: Clone> Peel<D, ParserId> {
     /// Remove a parser from the graph and return if existing.
     pub fn remove(&mut self, node: NodeIndex) -> Option<Parser<D>> {
         info!("Removed: {:?}", self.graph[node]);
-        self.graph.remove_node(node)
+        self.graph.remove_node(node).map(|(parser, _)| parser)
     }
 
     /// Link multiple nodes together
@@ -204,7 +199,7 @@ impl<D, ParserId: Clone> Peel<D, ParserId> {
             self.last_position = node_id;
 
             // Do the actual parsing work
-            match parser.parse(peel_result.left_input,
+            match parser.0.parse(peel_result.left_input,
                                Some(&peel_result.result),
                                if let Some(ref mut data) = self.data {
                                    Some(data)
@@ -218,7 +213,7 @@ impl<D, ParserId: Clone> Peel<D, ParserId> {
                            parser,
                            left_input.len());
                     peel_result.result.push(parser_result);
-                    peel_result.parsers.push(self.id_map.get(&node_id).expect("Missing a parser ID").clone());
+                    peel_result.parsers.push(parser.1.clone());
                     peel_result.left_input = left_input;
                     None
                 }
